@@ -543,14 +543,27 @@ class Trader:
         print(f"Received ProtoOASymbolByIdRes with details for {len(actual_message.symbol)} symbol(s).")
 
         for detailed_symbol_proto in actual_message.symbol: # These are full ProtoOASymbol objects
+            # ProtoOASymbol does not have symbolName, get it from symbols_map
+            symbol_name_for_logging = "Unknown"
+            for name, id_val in self.symbols_map.items():
+                if id_val == detailed_symbol_proto.symbolId:
+                    symbol_name_for_logging = name
+                    break
+
             self.symbol_details_map[detailed_symbol_proto.symbolId] = detailed_symbol_proto
-            print(f"  Stored full details for Symbol ID: {detailed_symbol_proto.symbolId} ({detailed_symbol_proto.symbolName}), Digits: {detailed_symbol_proto.digits}, PipPosition: {detailed_symbol_proto.pipPosition}")
+            print(f"  Stored full details for Symbol ID: {detailed_symbol_proto.symbolId} ({symbol_name_for_logging}), Digits: {detailed_symbol_proto.digits}, PipPosition: {detailed_symbol_proto.pipPosition}")
 
         # After updating the details map, check if we have details for the default symbol
         # and if so, proceed to subscribe for its spot prices.
         if self.default_symbol_id is not None and self.default_symbol_id in self.symbol_details_map:
-            default_symbol_name = self.symbol_details_map[self.default_symbol_id].symbolName
-            print(f"Full details for default symbol '{default_symbol_name}' (ID: {self.default_symbol_id}) received. Subscribing to spots.")
+            # Get the default symbol's name from symbols_map for logging
+            default_symbol_name_for_logging = "Unknown"
+            for name, id_val in self.symbols_map.items():
+                if id_val == self.default_symbol_id:
+                    default_symbol_name_for_logging = name
+                    break
+
+            print(f"Full details for default symbol '{default_symbol_name_for_logging}' (ID: {self.default_symbol_id}) received. Subscribing to spots.")
 
             # Ensure ctidTraderAccountId is available before subscribing
             if self.ctid_trader_account_id is not None:
