@@ -3,6 +3,7 @@ import threading
 import tkinter as tk
 import queue
 from tkinter import ttk, messagebox, simpledialog
+from typing import List # Added for type hinting
 from trading import Trader  # adjust import path if needed
 from strategies import (
     SafeStrategy, ModerateStrategy, AggressiveStrategy,
