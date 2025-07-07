@@ -11,3 +11,7 @@ ctrader-open-api
 requests
 
 # tkinter for the GUI is part of the standard library.
+
+# For data manipulation and technical indicators
+pandas
+pandas-ta
