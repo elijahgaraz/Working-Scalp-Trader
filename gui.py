@@ -4,6 +4,7 @@ import tkinter as tk
 import queue
 from tkinter import ttk, messagebox, simpledialog
 from typing import List # Added for type hinting
+import pandas as pd # Added for OHLC data handling
 from trading import Trader  # adjust import path if needed
 from strategies import (
     SafeStrategy, ModerateStrategy, AggressiveStrategy,
@@ -466,28 +467,64 @@ class TradingPage(ttk.Frame):
     def _scalp_loop(self, symbol: str, tp: float, sl: float, size: float, strategy):
         """Background thread: pure logic, enqueues UI updates."""
         while self.is_scalping:
-            price   = self.trader.get_market_price(symbol)
-            history = self.trader.price_history
-            action  = strategy.decide({"prices": history})
+            current_tick_price = self.trader.get_market_price(symbol) # Fetches latest tick price
 
-            if action in ("buy", "sell"):
-                # enqueue an _execute_trade call
-                self._ui_queue.put((
-                    self._execute_trade,
-                    (action, symbol, price, size, tp, sl)
-                ))
-            else:
-                self._ui_queue.put((self._log, ("HOLD signal; skipping trade.",)))
+            # Fetch OHLC data and other necessary info from the trader
+            # Use empty DataFrames as fallback if history not yet populated for a timeframe
+            ohlc_1m_df = self.trader.ohlc_history.get('1m', pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']))
+            ohlc_15s_df = self.trader.ohlc_history.get('15s', pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']))
 
-            time.sleep(1)
+            current_equity = self.trader.equity # Might be None if not connected/updated
+
+            pip_position_val = None
+            if self.trader.default_symbol_id and \
+               self.trader.default_symbol_id in self.trader.symbol_details_map and \
+               hasattr(self.trader.symbol_details_map[self.trader.default_symbol_id], 'pipPosition'):
+                pip_position_val = self.trader.symbol_details_map[self.trader.default_symbol_id].pipPosition
+
+            data_for_strategy = {
+                'ohlc_1m': ohlc_1m_df,
+                'ohlc_15s': ohlc_15s_df,
+                'current_equity': current_equity,
+                'pip_position': pip_position_val, # For calculating pip value / SL-TP in pips
+                'current_price_tick': current_tick_price
+            }
+
+            action_details = strategy.decide(data_for_strategy) # Expected to be a dict
+
+            if action_details and isinstance(action_details, dict):
+                trade_action = action_details.get('action')
+                if trade_action in ("buy", "sell"):
+                    # For now, pass the raw offsets. _execute_trade will eventually need to handle them.
+                    sl_offset = action_details.get('sl_offset')
+                    tp_offset = action_details.get('tp_offset')
+                    comment = action_details.get('comment', '')
+
+                    self._ui_queue.put((self._log, (f"Strategy signal: {trade_action.upper()} for {symbol}. {comment}",)))
+                    self._ui_queue.put((
+                        self._execute_trade,
+                        # Pass original tp/sl from GUI for now, plus new offsets
+                        (trade_action, symbol, current_tick_price, size, tp, sl, sl_offset, tp_offset, comment)
+                    ))
+                else: # 'hold' or other non-trade action
+                    comment = action_details.get('comment', "Strategy returned HOLD or no action.")
+                    self._ui_queue.put((self._log, (comment,)))
+            else: # Strategy returned None or unexpected type
+                self._ui_queue.put((self._log, ("Strategy did not return a valid action dictionary.",)))
+
+            time.sleep(1) # Consider making this configurable
 
     def _execute_trade(self,
                        side: str,
                        symbol: str,
-                       price: float,
+                       price: float, # This is current_tick_price
                        size: float,
-                       tp: float,
-                       sl: float):
+                       tp_pips_gui: float, # Original TP in pips from GUI
+                       sl_pips_gui: float, # Original SL in pips from GUI
+                       # Parameters from strategy's decision dictionary:
+                       sl_offset_strategy: float | None,
+                       tp_offset_strategy: float | None,
+                       strategy_comment: str):
         """Runs on the Tk mainloop—safe to update UI."""
         price_str = f"{price:.5f}" if price is not None else "N/A (unknown)"
         self._log(f"{side.upper()} scalp: {symbol} at {price_str} | "
