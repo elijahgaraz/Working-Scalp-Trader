@@ -756,6 +756,12 @@ class Trader:
         #    print(f"Tick for subscribed symbol {symbol_id}: Bid={latest_bid}, Ask={latest_ask}")
         #    # Store this latest_bid/ask in a suitable structure if needed for other parts of the app.
 
+    def get_available_symbol_names(self) -> List[str]:
+        """Returns a sorted list of symbol name strings available from the API."""
+        if not self.symbols_map:
+            return []
+        return sorted(list(self.symbols_map.keys()))
+
     def _handle_execution_event(self, event: ProtoOAExecutionEvent) -> None:
         # TODO: handle executions
         pass
