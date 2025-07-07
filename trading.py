@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import queue
 import sys
 import traceback
+import pandas as pd
+from datetime import datetime, timezone
 
 # Conditional import for Twisted reactor for GUI integration
 _reactor_installed = False
@@ -112,8 +114,32 @@ class Trader:
         self.is_connected: bool = False
         self._is_client_connected: bool = False
         self._last_error: str = ""
-        self.price_history: List[float] = []
-        self.history_size = history_size
+        self.price_history: List[float] = [] # Stores recent bid prices for the default symbol (tick data)
+        self.history_size = history_size # Max length for self.price_history
+
+        # OHLC Data Storage for default symbol
+        self.timeframes_seconds = {
+            '15s': 15,
+            '1m': 60,
+            '5m': 300
+        }
+        self.current_bars = {} # Stores the currently forming bar for each timeframe
+        self.ohlc_history = {} # Stores history of completed bars for each timeframe
+        self.max_ohlc_history_len = 200 # Max number of OHLC bars to keep per timeframe
+
+        for tf_str in self.timeframes_seconds.keys():
+            self.current_bars[tf_str] = {
+                'timestamp': None, # Start time of the bar (datetime object)
+                'open': None,
+                'high': None,
+                'low': None,
+                'close': None,
+                'volume': 0 # Using tick count as volume for now
+            }
+            self.ohlc_history[tf_str] = pd.DataFrame(
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+
 
         # Initialize token fields before loading
         self._access_token: Optional[str] = None
@@ -730,59 +756,97 @@ class Trader:
         # Log the raw event for debugging if needed, can be very noisy
         # print(f"Received ProtoOASpotEvent: {event}")
 
-        # --- Trendbar Investigation ---
-        if event.HasField("trendbar") and len(event.trendbar) > 0:
-            print(f"--- TRENDBAR DATA RECEIVED for Symbol ID: {event.symbolId} ---")
-            for bar in event.trendbar:
-                period_name = bar.Period.Name(bar.period) if hasattr(bar, 'Period') and hasattr(bar.Period, 'Name') else bar.period
-                # Timestamp is usually in milliseconds since epoch
-                # Volume is often in terms of 1/100_000 of lots or similar, needs checking against docs
-                print(f"  Trendbar Period: {period_name}, "
-                      f"Timestamp: {bar.timestamp if bar.HasField('timestamp') else 'N/A'}, "
-                      f"Open: {bar.open if bar.HasField('open') else 'N/A'}, "
-                      f"High: {bar.high if bar.HasField('high') else 'N/A'}, "
-                      f"Low: {bar.low if bar.HasField('low') else 'N/A'}, "
-                      f"Close: {bar.close if bar.HasField('close') else 'N/A'}, "
-                      f"Volume: {bar.volume if bar.HasField('volume') else 'N/A'}")
-            print(f"--- END TRENDBAR DATA ---")
-        # --- End Trendbar Investigation ---
+        # --- Trendbar Investigation (removed as it caused ValueError and trendbars were not populated) ---
 
         symbol_id = event.symbolId
 
-        # For now, we primarily care about updating price_history for the default_symbol_id
-        # or any symbol explicitly subscribed for detailed history.
-        # Later, this could be expanded to update a general structure for all subscribed symbols.
-
         if self.default_symbol_id is not None and symbol_id == self.default_symbol_id:
-            bid_price = event.bid if event.HasField('bid') else None
-            # ask_price = event.ask if event.HasField('ask') else None # Also available
+            # Ensure we have bid price and timestamp to work with
+            if not event.HasField('bid') or not event.HasField('timestamp'):
+                print(f"Spot Event for default symbol {symbol_id} missing bid or timestamp. Skipping OHLC update.")
+                return
 
-            if bid_price is not None:
-                # Prices from ProtoOASpotEvent are typically integers.
-                # The conversion factor depends on the symbol's digits.
-                # Assuming 5 decimal places for typical Forex pairs (e.g., EURUSD price 1.23456 is sent as 123456)
-                # This needs to be robust, ideally by fetching symbol details (digits).
-                # For now, using a common factor of 10^5.
-                # A more robust solution would be to use self.symbol_details_map[symbol_id].digits
-                price_scale_factor = 100000.0 # Default, should be symbol.digits
+            # Scale the price
+            raw_bid_price = event.bid
+            price_scale_factor = 100000.0 # Default
+            if symbol_id in self.symbol_details_map:
+                digits = self.symbol_details_map[symbol_id].digits
+                price_scale_factor = float(10**digits)
 
-                if symbol_id in self.symbol_details_map:
-                    digits = self.symbol_details_map[symbol_id].digits
-                    price_scale_factor = float(10**digits)
+            current_price = raw_bid_price / price_scale_factor
 
+            # Update simple price history (for immediate price checks, GUI, etc.)
+            self.price_history.append(current_price)
+            if len(self.price_history) > self.history_size:
+                self.price_history.pop(0)
 
-                converted_bid_price = bid_price / price_scale_factor
+            # OHLC Aggregation Logic
+            event_dt = datetime.fromtimestamp(event.timestamp / 1000, tz=timezone.utc)
 
-                self.price_history.append(converted_bid_price)
-                if len(self.price_history) > self.history_size:
-                    self.price_history.pop(0)
+            for tf_str, tf_seconds in self.timeframes_seconds.items():
+                current_tf_bar = self.current_bars[tf_str]
 
-                # print(f"Spot Event for {symbol_id} (Default Symbol): Bid Price = {converted_bid_price}, History Size: {len(self.price_history)}")
-            else:
-                print(f"Spot Event for {symbol_id} (Default Symbol) received, but no bid price found in event.")
+                if current_tf_bar['timestamp'] is None: # First tick for this timeframe or after a reset
+                    current_tf_bar['timestamp'] = event_dt.replace(second= (event_dt.second // tf_seconds) * tf_seconds, microsecond=0)
+                    current_tf_bar['open'] = current_price
+                    current_tf_bar['high'] = current_price
+                    current_tf_bar['low'] = current_price
+                    current_tf_bar['close'] = current_price
+                    current_tf_bar['volume'] = 1 # Tick count
+                else:
+                    # Check if current tick falls into a new bar interval
+                    bar_end_time = current_tf_bar['timestamp'] + pd.Timedelta(seconds=tf_seconds)
+
+                    if event_dt >= bar_end_time:
+                        # Finalize the old bar
+                        # The 'close' of the old bar is already set by the last tick that fell into it.
+                        # (or it should be the last tick's price before this new one)
+                        # For simplicity, current_tf_bar['close'] is the last tick's price of that bar.
+
+                        # Add completed bar to history (if it has data)
+                        if current_tf_bar['open'] is not None:
+                            completed_bar_data = {
+                                'timestamp': current_tf_bar['timestamp'], # Start time of the completed bar
+                                'open': current_tf_bar['open'],
+                                'high': current_tf_bar['high'],
+                                'low': current_tf_bar['low'],
+                                'close': current_tf_bar['close'], # Close of the *previous* bar
+                                'volume': current_tf_bar['volume']
+                            }
+                            # Use pd.concat instead of append for DataFrames
+                            self.ohlc_history[tf_str] = pd.concat([
+                                self.ohlc_history[tf_str],
+                                pd.DataFrame([completed_bar_data])
+                            ], ignore_index=True)
+
+                            # Keep history to max_ohlc_history_len
+                            if len(self.ohlc_history[tf_str]) > self.max_ohlc_history_len:
+                                self.ohlc_history[tf_str] = self.ohlc_history[tf_str].iloc[-self.max_ohlc_history_len:]
+
+                            # Optional: Log completed bar
+                            # print(f"Completed {tf_str} bar: O={completed_bar_data['open']:.5f} H={completed_bar_data['high']:.5f} L={completed_bar_data['low']:.5f} C={completed_bar_data['close']:.5f} V={completed_bar_data['volume']}")
+
+                        # Start a new bar
+                        current_tf_bar['timestamp'] = event_dt.replace(second=(event_dt.second // tf_seconds) * tf_seconds, microsecond=0)
+                        current_tf_bar['open'] = current_price
+                        current_tf_bar['high'] = current_price
+                        current_tf_bar['low'] = current_price
+                        current_tf_bar['close'] = current_price
+                        current_tf_bar['volume'] = 1
+                    else:
+                        # Update current (still forming) bar
+                        current_tf_bar['high'] = max(current_tf_bar['high'], current_price)
+                        current_tf_bar['low'] = min(current_tf_bar['low'], current_price)
+                        current_tf_bar['close'] = current_price
+                        current_tf_bar['volume'] += 1
+
+            # Optional: Log the latest tick after processing for OHLC
+            # print(f"Spot Event for {symbol_id} (Default Symbol): Bid Price = {current_price:.5f}, History Size: {len(self.price_history)}")
+
+        # else: # This was for non-default symbols, can be ignored for now
+            # print(f"Spot Event for {symbol_id} (Default Symbol) received, but no bid price found in event.") # This log might be confusing now
 
         # Additionally, one might want to store the latest tick for all subscribed symbols,
-        # not just the default one for which full history is kept.
         # This part is an extension and not strictly for self.price_history of the default symbol.
         # if symbol_id in self.subscribed_spot_symbol_ids:
         #    latest_bid = event.bid / price_scale_factor if event.HasField('bid') else None
