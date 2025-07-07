@@ -14,4 +14,5 @@ requests
 
 # For data manipulation and technical indicators
 pandas
+numpy~=1.26.0 # Pin numpy to a version likely compatible with pandas-ta's NaN import
 pandas-ta
