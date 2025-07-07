@@ -85,9 +85,10 @@ try:
         ProtoOAErrorRes,
         # Specific message types for deserialization
         ProtoOAGetCtidProfileByTokenRes,
-        ProtoOAGetCtidProfileByTokenReq
+        ProtoOAGetCtidProfileByTokenReq,
+        ProtoOASymbolsListReq, ProtoOASymbolsListRes # For fetching symbol details
     )
-    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrader
+    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrader, ProtoOASymbol # For symbol details
     USE_OPENAPI_LIB = True
 except ImportError as e:
     print(f"ctrader-open-api import failed ({e}); running in mock mode.")
@@ -124,6 +125,13 @@ class Trader:
         self.equity: Optional[float] = None
         self.currency: Optional[str] = None
         self.used_margin: Optional[float] = None # For margin used
+
+        # Symbol data
+        self.symbols_map: Dict[str, int] = {} # Map from symbol name to symbolId
+        self.symbol_details_map: Dict[int, Any] = {} # Map from symbolId to ProtoOASymbol
+        self.default_symbol_id: Optional[int] = None # Symbol ID for the default_symbol from settings
+        self.subscribed_spot_symbol_ids: set[int] = set()
+
 
         self._client: Optional[Client] = None
         self._message_id_counter: int = 1
@@ -259,6 +267,14 @@ class Trader:
         elif isinstance(actual_message, ProtoOAGetAccountListByAccessTokenRes):
             print("  Dispatching to _handle_get_account_list_response")
             self._handle_get_account_list_response(actual_message)
+        elif isinstance(actual_message, ProtoOASymbolsListRes):
+            print("  Dispatching to _handle_symbols_list_response")
+            self._handle_symbols_list_response(actual_message)
+        elif isinstance(actual_message, ProtoOASubscribeSpotsRes):
+            # This is usually handled by the callback in _send_subscribe_spots_request directly,
+            # but good to have a dispatch log if it comes through _on_message_received.
+            print("  Received ProtoOASubscribeSpotsRes (typically handled by send callback).")
+            # self._handle_subscribe_spots_response(actual_message, []) # Might need context if called here
         elif isinstance(actual_message, ProtoOATraderRes):
             print("  Dispatching to _handle_trader_response")
             self._handle_trader_response(actual_message)
@@ -266,8 +282,8 @@ class Trader:
             print("  Dispatching to _handle_trader_updated_event")
             self._handle_trader_updated_event(actual_message)
         elif isinstance(actual_message, ProtoOASpotEvent):
-            # self._handle_spot_event(actual_message) # Potentially noisy
-             print("  Received ProtoOASpotEvent (handler commented out).")
+            self._handle_spot_event(actual_message) # Potentially noisy
+            # print("  Received ProtoOASpotEvent (handler commented out).")
         elif isinstance(actual_message, ProtoOAExecutionEvent):
             # self._handle_execution_event(actual_message) # Potentially noisy
              print("  Received ProtoOAExecutionEvent (handler commented out).")
@@ -381,6 +397,90 @@ class Trader:
         # That's the role of ProtoOAAccountAuthRes.
         pass
 
+    def _handle_subscribe_spots_response(self, response_wrapper: Any, subscribed_symbol_ids: List[int]) -> None:
+        """Handles the response from a ProtoOASubscribeSpotsReq."""
+        if isinstance(response_wrapper, ProtoMessage):
+            actual_message = Protobuf.extract(response_wrapper)
+            print(f"_handle_subscribe_spots_response: Extracted {type(actual_message)} from ProtoMessage wrapper.")
+        else:
+            actual_message = response_wrapper
+
+        if not isinstance(actual_message, ProtoOASubscribeSpotsRes):
+            print(f"_handle_subscribe_spots_response: Expected ProtoOASubscribeSpotsRes, got {type(actual_message)}. Message: {actual_message}")
+            # Potentially set an error or log failure for specific symbols if the response structure allowed it.
+            # For ProtoOASubscribeSpotsRes, it's usually an empty message on success.
+            # Errors would typically come as ProtoOAErrorRes or via _handle_send_error.
+            self._last_error = f"Spot subscription response was not ProtoOASubscribeSpotsRes for symbols {subscribed_symbol_ids}."
+            return
+
+        # ProtoOASubscribeSpotsRes is an empty message. Its reception confirms the subscription request was processed.
+        # Actual spot data will come via ProtoOASpotEvent.
+        print(f"Successfully processed spot subscription request for ctidTraderAccountId: {self.ctid_trader_account_id} and symbol IDs: {subscribed_symbol_ids}.")
+        # No specific action needed here other than logging, errors are usually separate messages.
+
+    def _send_get_symbols_list_request(self) -> None:
+        """Sends a ProtoOASymbolsListReq to get all symbols for the authenticated account."""
+        if not self._ensure_valid_token(): # Should not be strictly necessary if called after successful auth, but good practice
+            return
+        if not self._client or not self._is_client_connected:
+            self._last_error = "Cannot get symbols list: Client not connected."
+            print(self._last_error)
+            return
+        if not self.ctid_trader_account_id:
+            self._last_error = "Cannot get symbols list: ctidTraderAccountId is not set."
+            print(self._last_error)
+            return
+
+        print(f"Requesting symbols list for account {self.ctid_trader_account_id}")
+        req = ProtoOASymbolsListReq()
+        req.ctidTraderAccountId = self.ctid_trader_account_id
+        # req.includeArchivedSymbols = False # Optional: to include archived symbols
+
+        print(f"Sending ProtoOASymbolsListReq: {req}")
+        try:
+            d = self._client.send(req)
+            d.addCallbacks(self._handle_symbols_list_response, self._handle_send_error)
+            print("Added callbacks to ProtoOASymbolsListReq Deferred.")
+        except Exception as e:
+            print(f"Exception during _send_get_symbols_list_request send command: {e}")
+            self._last_error = f"Exception sending symbols list request: {e}"
+
+    def _handle_symbols_list_response(self, response_wrapper: Any) -> None:
+        """Handles the response from a ProtoOASymbolsListReq."""
+        if isinstance(response_wrapper, ProtoMessage):
+            actual_message = Protobuf.extract(response_wrapper)
+            print(f"_handle_symbols_list_response: Extracted {type(actual_message)} from ProtoMessage wrapper.")
+        else:
+            actual_message = response_wrapper
+
+        if not isinstance(actual_message, ProtoOASymbolsListRes):
+            print(f"_handle_symbols_list_response: Expected ProtoOASymbolsListRes, got {type(actual_message)}. Message: {actual_message}")
+            self._last_error = "Symbols list response was not ProtoOASymbolsListRes."
+            return
+
+        print(f"Received ProtoOASymbolsListRes with {len(actual_message.symbol)} symbols.")
+        self.symbols_map.clear()
+        self.symbol_details_map.clear()
+        self.default_symbol_id = None
+
+        for symbol_proto in actual_message.symbol: # type: ProtoOASymbol
+            self.symbols_map[symbol_proto.symbolName] = symbol_proto.symbolId
+            self.symbol_details_map[symbol_proto.symbolId] = symbol_proto
+            # print(f"  Symbol: {symbol_proto.symbolName}, ID: {symbol_proto.symbolId}, Digits: {symbol_proto.digits}")
+
+            if symbol_proto.symbolName == self.settings.general.default_symbol:
+                self.default_symbol_id = symbol_proto.symbolId
+                print(f"Found default_symbol: '{self.settings.general.default_symbol}' with ID: {self.default_symbol_id} and Digits: {symbol_proto.digits}")
+
+        if self.default_symbol_id is not None:
+            print(f"Default symbol '{self.settings.general.default_symbol}' identified with ID {self.default_symbol_id}. Subscribing to spots.")
+            # Now subscribe to spots for the default symbol
+            self._send_subscribe_spots_request(self.ctid_trader_account_id, [self.default_symbol_id])
+            self.subscribed_spot_symbol_ids.add(self.default_symbol_id)
+        else:
+            print(f"Warning: Default symbol '{self.settings.general.default_symbol}' not found in symbols list for account {self.ctid_trader_account_id}.")
+            self._last_error = f"Default symbol '{self.settings.general.default_symbol}' not found."
+
 
     def _handle_account_auth_response(self, response: ProtoOAAccountAuthRes) -> None:
         print(f"Received ProtoOAAccountAuthRes: {response}")
@@ -396,6 +496,11 @@ class Trader:
 
             # TODO: Subscribe to spots, etc., as needed by the application
             # self._send_subscribe_spots_request(symbol_id) # Example
+
+            # After successful account auth, fetch symbol list to find default_symbol_id
+            print("Account authenticated. Requesting symbols list...")
+            self._send_get_symbols_list_request()
+
         else:
             print(f"AccountAuth failed. Expected ctidTraderAccountId {self.ctid_trader_account_id}, "
                   f"but response was for {response.ctidTraderAccountId if hasattr(response, 'ctidTraderAccountId') else 'unknown'}.")
@@ -526,8 +631,52 @@ class Trader:
         return None
 
     def _handle_spot_event(self, event: ProtoOASpotEvent) -> None:
-        # TODO: update self.price_history
-        pass
+        """Handles incoming spot events (price updates)."""
+        # Log the raw event for debugging if needed, can be very noisy
+        # print(f"Received ProtoOASpotEvent: {event}")
+
+        symbol_id = event.symbolId
+
+        # For now, we primarily care about updating price_history for the default_symbol_id
+        # or any symbol explicitly subscribed for detailed history.
+        # Later, this could be expanded to update a general structure for all subscribed symbols.
+
+        if self.default_symbol_id is not None and symbol_id == self.default_symbol_id:
+            bid_price = event.bid if event.HasField('bid') else None
+            # ask_price = event.ask if event.HasField('ask') else None # Also available
+
+            if bid_price is not None:
+                # Prices from ProtoOASpotEvent are typically integers.
+                # The conversion factor depends on the symbol's digits.
+                # Assuming 5 decimal places for typical Forex pairs (e.g., EURUSD price 1.23456 is sent as 123456)
+                # This needs to be robust, ideally by fetching symbol details (digits).
+                # For now, using a common factor of 10^5.
+                # A more robust solution would be to use self.symbol_details_map[symbol_id].digits
+                price_scale_factor = 100000.0 # Default, should be symbol.digits
+
+                if symbol_id in self.symbol_details_map:
+                    digits = self.symbol_details_map[symbol_id].digits
+                    price_scale_factor = float(10**digits)
+
+
+                converted_bid_price = bid_price / price_scale_factor
+
+                self.price_history.append(converted_bid_price)
+                if len(self.price_history) > self.history_size:
+                    self.price_history.pop(0)
+
+                # print(f"Spot Event for {symbol_id} (Default Symbol): Bid Price = {converted_bid_price}, History Size: {len(self.price_history)}")
+            else:
+                print(f"Spot Event for {symbol_id} (Default Symbol) received, but no bid price found in event.")
+
+        # Additionally, one might want to store the latest tick for all subscribed symbols,
+        # not just the default one for which full history is kept.
+        # This part is an extension and not strictly for self.price_history of the default symbol.
+        # if symbol_id in self.subscribed_spot_symbol_ids:
+        #    latest_bid = event.bid / price_scale_factor if event.HasField('bid') else None
+        #    latest_ask = event.ask / price_scale_factor if event.HasField('ask') else None
+        #    print(f"Tick for subscribed symbol {symbol_id}: Bid={latest_bid}, Ask={latest_ask}")
+        #    # Store this latest_bid/ask in a suitable structure if needed for other parts of the app.
 
     def _handle_execution_event(self, event: ProtoOAExecutionEvent) -> None:
         # TODO: handle executions
@@ -663,6 +812,46 @@ class Trader:
             if self._client and self._is_client_connected:
                 self._client.stopService()
                 self.is_connected = False
+
+    def _send_subscribe_spots_request(self, ctid_trader_account_id: int, symbol_ids: List[int]) -> None:
+        """Sends a ProtoOASubscribeSpotsReq to subscribe to spot prices for given symbol IDs."""
+        if not self._ensure_valid_token():
+            return
+        if not self._client or not self._is_client_connected:
+            self._last_error = "Cannot subscribe to spots: Client not connected."
+            print(self._last_error)
+            return
+        if not ctid_trader_account_id:
+            self._last_error = "Cannot subscribe to spots: ctidTraderAccountId is not set."
+            print(self._last_error)
+            return
+        if not symbol_ids:
+            self._last_error = "Cannot subscribe to spots: No symbol_ids provided."
+            print(self._last_error)
+            return
+
+        print(f"Requesting spot subscription for account {ctid_trader_account_id} and symbols {symbol_ids}")
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = ctid_trader_account_id
+        req.symbolId.extend(symbol_ids) # symbolId is a repeated field
+
+        # clientMsgId can be set if needed, but for subscriptions, the server pushes updates
+        # req.clientMsgId = self._next_message_id()
+
+        print(f"Sending ProtoOASubscribeSpotsReq: {req}")
+        try:
+            d = self._client.send(req)
+            # Add callbacks: one for the direct response to the subscription request,
+            # and one for handling errors during sending.
+            # Spot events themselves will be handled by _on_message_received -> _handle_spot_event.
+            d.addCallbacks(
+                lambda response: self._handle_subscribe_spots_response(response, symbol_ids),
+                self._handle_send_error
+            )
+            print("Added callbacks to ProtoOASubscribeSpotsReq Deferred.")
+        except Exception as e:
+            print(f"Exception during _send_subscribe_spots_request send command: {e}")
+            self._last_error = f"Exception sending spot subscription: {e}"
 
 
     # Public API
@@ -1065,9 +1254,34 @@ class Trader:
             "margin": self.used_margin # This will be None initially, or updated from ProtoOATrader
         }
 
-    def get_market_price(self, symbol: str) -> float:
-        if not USE_OPENAPI_LIB or not self.price_history:
+    def get_market_price(self, symbol: str) -> Optional[float]:
+        """
+        Returns the latest market price (bid) for the default subscribed symbol.
+        The 'symbol' argument is currently ignored as price_history is only maintained
+        for the default_symbol_id. Future enhancements could allow fetching prices
+        for other subscribed symbols if latest ticks are stored separately.
+        """
+        if not USE_OPENAPI_LIB:
+            # Mock mode: return a random price
+            print(f"Mock mode: Returning random price for {symbol}")
             return round(random.uniform(1.10, 1.20), 5)
+
+        if self.default_symbol_id is None:
+            print(f"Warning: Default symbol ID not set. Cannot get market price for {symbol}.")
+            return None
+
+        # Currently, price_history is only for the default_symbol_id
+        # We also check if the requested symbol matches the default symbol name from settings for clarity,
+        # though technically self.price_history is always for default_symbol_id.
+        if symbol != self.settings.general.default_symbol:
+            print(f"Warning: get_market_price currently only supports the default symbol '{self.settings.general.default_symbol}'. Requested: '{symbol}'. Returning latest from default history if available.")
+            # Depending on strictness, one might return None here.
+            # For now, proceed to return default symbol's last price.
+
+        if not self.price_history:
+            # print(f"No price history available for default symbol ({self.settings.general.default_symbol}). Cannot get market price.")
+            return None # No data yet
+
         return self.price_history[-1]
 
     def get_price_history(self) -> List[float]:
