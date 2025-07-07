@@ -730,6 +730,23 @@ class Trader:
         # Log the raw event for debugging if needed, can be very noisy
         # print(f"Received ProtoOASpotEvent: {event}")
 
+        # --- Trendbar Investigation ---
+        if event.HasField("trendbar") and len(event.trendbar) > 0:
+            print(f"--- TRENDBAR DATA RECEIVED for Symbol ID: {event.symbolId} ---")
+            for bar in event.trendbar:
+                period_name = bar.Period.Name(bar.period) if hasattr(bar, 'Period') and hasattr(bar.Period, 'Name') else bar.period
+                # Timestamp is usually in milliseconds since epoch
+                # Volume is often in terms of 1/100_000 of lots or similar, needs checking against docs
+                print(f"  Trendbar Period: {period_name}, "
+                      f"Timestamp: {bar.timestamp if bar.HasField('timestamp') else 'N/A'}, "
+                      f"Open: {bar.open if bar.HasField('open') else 'N/A'}, "
+                      f"High: {bar.high if bar.HasField('high') else 'N/A'}, "
+                      f"Low: {bar.low if bar.HasField('low') else 'N/A'}, "
+                      f"Close: {bar.close if bar.HasField('close') else 'N/A'}, "
+                      f"Volume: {bar.volume if bar.HasField('volume') else 'N/A'}")
+            print(f"--- END TRENDBAR DATA ---")
+        # --- End Trendbar Investigation ---
+
         symbol_id = event.symbolId
 
         # For now, we primarily care about updating price_history for the default_symbol_id
