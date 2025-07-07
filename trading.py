@@ -86,9 +86,12 @@ try:
         # Specific message types for deserialization
         ProtoOAGetCtidProfileByTokenRes,
         ProtoOAGetCtidProfileByTokenReq,
-        ProtoOASymbolsListReq, ProtoOASymbolsListRes # For fetching symbol details
+        ProtoOASymbolsListReq, ProtoOASymbolsListRes, # For fetching symbol list (light symbols)
+        ProtoOASymbolByIdReq, ProtoOASymbolByIdRes    # For fetching full symbol details
     )
-    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrader, ProtoOASymbol # For symbol details
+    # ProtoOALightSymbol is implicitly used by ProtoOASymbolsListRes
+    # ProtoOASymbol is used by ProtoOASymbolByIdRes and for our symbol_details_map value type
+    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrader, ProtoOASymbol
     USE_OPENAPI_LIB = True
 except ImportError as e:
     print(f"ctrader-open-api import failed ({e}); running in mock mode.")
@@ -270,6 +273,9 @@ class Trader:
         elif isinstance(actual_message, ProtoOASymbolsListRes):
             print("  Dispatching to _handle_symbols_list_response")
             self._handle_symbols_list_response(actual_message)
+        elif isinstance(actual_message, ProtoOASymbolByIdRes):
+            print("  Dispatching to _handle_symbol_details_response")
+            self._handle_symbol_details_response(actual_message)
         elif isinstance(actual_message, ProtoOASubscribeSpotsRes):
             # This is usually handled by the callback in _send_subscribe_spots_request directly,
             # but good to have a dispatch log if it comes through _on_message_received.
@@ -418,6 +424,36 @@ class Trader:
         print(f"Successfully processed spot subscription request for ctidTraderAccountId: {self.ctid_trader_account_id} and symbol IDs: {subscribed_symbol_ids}.")
         # No specific action needed here other than logging, errors are usually separate messages.
 
+    def _send_get_symbol_details_request(self, symbol_ids: List[int]) -> None:
+        """Sends a ProtoOASymbolByIdReq to get full details for specific symbol IDs."""
+        if not self._ensure_valid_token():
+            return
+        if not self._client or not self._is_client_connected:
+            self._last_error = "Cannot get symbol details: Client not connected."
+            print(self._last_error)
+            return
+        if not self.ctid_trader_account_id: # ctidTraderAccountId is not part of ProtoOASymbolByIdReq
+            pass # but good to ensure we have it generally for consistency
+        if not symbol_ids:
+            self._last_error = "Cannot get symbol details: No symbol_ids provided."
+            print(self._last_error)
+            return
+
+        print(f"Requesting full symbol details for IDs: {symbol_ids}")
+        req = ProtoOASymbolByIdReq()
+        req.symbolId.extend(symbol_ids)
+        # req.ctidTraderAccountId = self.ctid_trader_account_id # Not required for this message type
+
+        print(f"Sending ProtoOASymbolByIdReq: {req}")
+        try:
+            d = self._client.send(req)
+            # The callback will handle ProtoOASymbolByIdRes
+            d.addCallbacks(self._handle_symbol_details_response, self._handle_send_error)
+            print("Added callbacks to ProtoOASymbolByIdReq Deferred.")
+        except Exception as e:
+            print(f"Exception during _send_get_symbol_details_request send command: {e}")
+            self._last_error = f"Exception sending symbol details request: {e}"
+
     def _send_get_symbols_list_request(self) -> None:
         """Sends a ProtoOASymbolsListReq to get all symbols for the authenticated account."""
         if not self._ensure_valid_token(): # Should not be strictly necessary if called after successful auth, but good practice
@@ -460,26 +496,68 @@ class Trader:
 
         print(f"Received ProtoOASymbolsListRes with {len(actual_message.symbol)} symbols.")
         self.symbols_map.clear()
-        self.symbol_details_map.clear()
+        # self.symbol_details_map.clear() # Cleared by symbol_details_response if needed, or upon new full fetch
         self.default_symbol_id = None
 
-        for symbol_proto in actual_message.symbol: # type: ProtoOASymbol
-            self.symbols_map[symbol_proto.symbolName] = symbol_proto.symbolId
-            self.symbol_details_map[symbol_proto.symbolId] = symbol_proto
-            # print(f"  Symbol: {symbol_proto.symbolName}, ID: {symbol_proto.symbolId}, Digits: {symbol_proto.digits}")
+        # The field in ProtoOASymbolsListRes is typically 'symbol' but contains ProtoOALightSymbol objects.
+        # If the field name is different (e.g., 'lightSymbol'), this loop needs adjustment.
+        # Assuming it's 'symbol' based on typical Protobuf generation.
+        symbols_field = getattr(actual_message, 'symbol', []) # Default to empty list if field not found
 
-            if symbol_proto.symbolName == self.settings.general.default_symbol:
-                self.default_symbol_id = symbol_proto.symbolId
-                print(f"Found default_symbol: '{self.settings.general.default_symbol}' with ID: {self.default_symbol_id} and Digits: {symbol_proto.digits}")
+        print(f"Received ProtoOASymbolsListRes with {len(symbols_field)} light symbols.")
+
+
+        for light_symbol_proto in symbols_field: # These are ProtoOALightSymbol
+            self.symbols_map[light_symbol_proto.symbolName] = light_symbol_proto.symbolId
+            # print(f"  Light Symbol: {light_symbol_proto.symbolName}, ID: {light_symbol_proto.symbolId}")
+
+            if light_symbol_proto.symbolName == self.settings.general.default_symbol:
+                self.default_symbol_id = light_symbol_proto.symbolId
+                print(f"Found default_symbol: '{self.settings.general.default_symbol}' with ID: {self.default_symbol_id} (Light symbol details). Requesting full details.")
 
         if self.default_symbol_id is not None:
-            print(f"Default symbol '{self.settings.general.default_symbol}' identified with ID {self.default_symbol_id}. Subscribing to spots.")
-            # Now subscribe to spots for the default symbol
-            self._send_subscribe_spots_request(self.ctid_trader_account_id, [self.default_symbol_id])
-            self.subscribed_spot_symbol_ids.add(self.default_symbol_id)
+            # Now that we have the ID, request full details for the default symbol
+            self._send_get_symbol_details_request([self.default_symbol_id])
         else:
             print(f"Warning: Default symbol '{self.settings.general.default_symbol}' not found in symbols list for account {self.ctid_trader_account_id}.")
             self._last_error = f"Default symbol '{self.settings.general.default_symbol}' not found."
+
+    def _handle_symbol_details_response(self, response_wrapper: Any) -> None:
+        """Handles the response from a ProtoOASymbolByIdReq, containing full symbol details."""
+        if isinstance(response_wrapper, ProtoMessage):
+            actual_message = Protobuf.extract(response_wrapper)
+            print(f"_handle_symbol_details_response: Extracted {type(actual_message)} from ProtoMessage wrapper.")
+        else:
+            actual_message = response_wrapper
+
+        if not isinstance(actual_message, ProtoOASymbolByIdRes):
+            print(f"_handle_symbol_details_response: Expected ProtoOASymbolByIdRes, got {type(actual_message)}. Message: {actual_message}")
+            self._last_error = "Symbol details response was not ProtoOASymbolByIdRes."
+            # Potentially try to re-request or handle error for specific symbols if needed.
+            return
+
+        print(f"Received ProtoOASymbolByIdRes with details for {len(actual_message.symbol)} symbol(s).")
+
+        for detailed_symbol_proto in actual_message.symbol: # These are full ProtoOASymbol objects
+            self.symbol_details_map[detailed_symbol_proto.symbolId] = detailed_symbol_proto
+            print(f"  Stored full details for Symbol ID: {detailed_symbol_proto.symbolId} ({detailed_symbol_proto.symbolName}), Digits: {detailed_symbol_proto.digits}, PipPosition: {detailed_symbol_proto.pipPosition}")
+
+        # After updating the details map, check if we have details for the default symbol
+        # and if so, proceed to subscribe for its spot prices.
+        if self.default_symbol_id is not None and self.default_symbol_id in self.symbol_details_map:
+            default_symbol_name = self.symbol_details_map[self.default_symbol_id].symbolName
+            print(f"Full details for default symbol '{default_symbol_name}' (ID: {self.default_symbol_id}) received. Subscribing to spots.")
+
+            # Ensure ctidTraderAccountId is available before subscribing
+            if self.ctid_trader_account_id is not None:
+                self._send_subscribe_spots_request(self.ctid_trader_account_id, [self.default_symbol_id])
+                self.subscribed_spot_symbol_ids.add(self.default_symbol_id)
+            else:
+                print(f"Error: ctidTraderAccountId not set. Cannot subscribe to spots for {default_symbol_name}.")
+                self._last_error = "ctidTraderAccountId not available for spot subscription after getting symbol details."
+        elif self.default_symbol_id is not None:
+            # This case should ideally not be hit if ProtoOASymbolByIdReq was successful for default_symbol_id
+            print(f"Warning: Full details for default symbol ID {self.default_symbol_id} not found in response, cannot subscribe to its spots yet.")
 
 
     def _handle_account_auth_response(self, response: ProtoOAAccountAuthRes) -> None:
