@@ -197,9 +197,9 @@ class SettingsPage(ttk.Frame):
             "Connected",
             f"Successfully connected!\n\n"
             f"Account ID: {display_account_id}\n"
-            f"Balance: {display_balance}\n"
-            f"Equity: {display_equity}\n"
-            f"Margin: {display_margin}"
+            f"Balance: {display_balance}\n" # Already handles None correctly for display_balance
+            f"Equity: {display_equity}\n"   # Already handles None correctly for display_equity
+            f"Margin: {display_margin}"     # Already handles None correctly for display_margin
         )
         self.status.config(text="Connected ✅", foreground="green")
 
@@ -340,16 +340,8 @@ class TradingPage(ttk.Frame):
     def update_account_info(self, account_id: str, balance: float | None, equity: float | None):
         """Public method to update account info StringVars from outside (e.g., SettingsPage)."""
         self.account_id_var_tp.set(str(account_id) if account_id is not None else "–")
-        
-        if balance is not None:
-            self.balance_var_tp.set(f"{balance:.2f}")
-        else:
-            self.balance_var_tp.set("–")
-            
-        if equity is not None:
-            self.equity_var_tp.set(f"{equity:.2f}")
-        else:
-            self.equity_var_tp.set("–")
+        self.balance_var_tp.set(f"{balance:.2f}" if balance is not None else "–")
+        self.equity_var_tp.set(f"{equity:.2f}" if equity is not None else "–")
         
         # Note: TradingPage does not currently display margin, so no update for it here.
 
@@ -368,8 +360,12 @@ class TradingPage(ttk.Frame):
         symbol = self.symbol_var.get().replace("/", "")
         try:
             price = self.trader.get_market_price(symbol)
-            self.price_var.set(f"{price:.5f}")
-            self._log(f"Refreshed price for {symbol}: {price:.5f}")
+            if price is not None:
+                self.price_var.set(f"{price:.5f}")
+                self._log(f"Refreshed price for {symbol}: {price:.5f}")
+            else:
+                self.price_var.set("–")
+                self._log(f"Price for {symbol} is currently unavailable (None).")
         except Exception as e:
             self.price_var.set("ERR")
             self._log(f"Error fetching price: {e}")
@@ -442,8 +438,14 @@ class TradingPage(ttk.Frame):
                        tp: float,
                        sl: float):
         """Runs on the Tk mainloop—safe to update UI."""
-        self._log(f"{side.upper()} scalp: {symbol} at {price:.5f} | "
+        price_str = f"{price:.5f}" if price is not None else "N/A (unknown)"
+        self._log(f"{side.upper()} scalp: {symbol} at {price_str} | "
                   f"size={size} lots | SL={sl} pips | TP={tp} pips")
+
+        if price is None:
+            self._log("Trade execution skipped: Market price is unavailable.")
+            return
+
         # Here you’d call self.trader.place_market_order(...) if real.
         import random
         result = round(random.uniform(-tp/2, tp), 2)
