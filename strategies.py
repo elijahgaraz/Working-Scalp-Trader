@@ -164,3 +164,4 @@ class MeanReversionStrategy(Strategy):
     NAME = "Mean-Reversion Scalper"
     def decide(self, data: Dict[str, Any]) -> Dict[str, Any]:
         # print(f"{self.NAME}.decide() called, data keys:", data.keys() if data else "None")
+        return {'action': 'hold', 'comment': f'{self.NAME} not implemented', 'sl_offset': None, 'tp_offset': None}
