@@ -210,11 +210,31 @@ class SettingsPage(ttk.Frame):
             balance=summary.get("balance"),
             equity=summary.get("equity")
         )
+
+        # Populate symbol dropdown on TradingPage
+        # This assumes trader.symbols_map is populated by now, which it should be
+        # as part of the connection and initial data fetching sequence.
+        available_symbols = t.get_available_symbol_names()
+        if available_symbols: # Ensure there are symbols before trying to populate
+            trading_page.populate_symbols_dropdown(available_symbols)
+        else:
+            # If no symbols returned by trader (e.g. map empty), populate with empty/error message
+            trading_page.populate_symbols_dropdown([])
+            self._log_to_trading_page("Warning: No symbols received from the trader to populate dropdown.")
+
+
         self.controller.show_page(TradingPage)
+
+    def _log_to_trading_page(self, message: str):
+        """Helper to log messages to the TradingPage's output log if available."""
+        if TradingPage in self.controller.pages:
+            trading_page = self.controller.pages[TradingPage]
+            if hasattr(trading_page, '_log'):
+                trading_page._log(f"[SettingsPage] {message}") # Prefix to identify source
 
 
 class TradingPage(ttk.Frame):
-    COMMON_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "NZD/USD"]
+    # COMMON_PAIRS removed, will be populated dynamically
 
     def __init__(self, parent, controller):
         super().__init__(parent, padding=10)
@@ -264,11 +284,11 @@ class TradingPage(ttk.Frame):
         # Symbol dropdown
         # Row indices are +1 from original due to Account Info section added at row=1
         ttk.Label(self, text="Symbol:").grid(row=2, column=0, sticky="w", padx=(0,5))
-        self.symbol_var = tk.StringVar(value=self.COMMON_PAIRS[0])
-        cb_symbol = ttk.Combobox(self, textvariable=self.symbol_var,
-                                 values=self.COMMON_PAIRS, state="readonly")
-        cb_symbol.grid(row=2, column=1, sticky="ew") # Corrected from row=1
-        cb_symbol.bind("<<ComboboxSelected>>", lambda e: self.refresh_price())
+        self.symbol_var = tk.StringVar(value="Loading symbols...") # Initial placeholder
+        self.cb_symbol = ttk.Combobox(self, textvariable=self.symbol_var,
+                                 values=[], state="readonly") # Initially empty
+        self.cb_symbol.grid(row=2, column=1, sticky="ew") # Corrected from row=1
+        self.cb_symbol.bind("<<ComboboxSelected>>", lambda e: self.refresh_price())
 
         # Price display + refresh
         ttk.Label(self, text="Price:").grid(row=3, column=0, sticky="w", padx=(0,5)) # Was row=2
@@ -335,7 +355,37 @@ class TradingPage(ttk.Frame):
         self.total_trades = 0
         self.wins         = 0
 
-        self.refresh_price()
+        # self.refresh_price() # Removed: Price will be refreshed when symbols are populated
+
+    def populate_symbols_dropdown(self, symbol_names: List[str]):
+        """Updates the symbol dropdown with the given list of names."""
+        if not symbol_names:
+            self.cb_symbol.config(values=[]) # Clear previous values if any
+            self.symbol_var.set("No symbols available")
+            self.price_var.set("–") # Reset price display
+            return
+
+        # Symbol names from API might not have slashes (e.g., "EURUSD")
+        # Settings default_symbol might also be in this format after previous fixes.
+        # The Combobox values should be what the API provides.
+        self.cb_symbol.config(values=symbol_names)
+
+        configured_default = self.controller.settings.general.default_symbol # e.g., "GBPUSD"
+
+        if configured_default in symbol_names:
+            self.symbol_var.set(configured_default)
+        elif symbol_names: # If default not found, but list is not empty, select first one
+            self.symbol_var.set(symbol_names[0])
+        else: # Should be caught by the initial 'if not symbol_names:'
+            self.symbol_var.set("No symbols available")
+
+        # Refresh price for the newly set/defaulted symbol, if it's a valid symbol string
+        current_selection = self.symbol_var.get()
+        if current_selection not in ["No symbols available", "Loading symbols...", ""]:
+            self.refresh_price()
+        else:
+            self.price_var.set("–") # Ensure price is reset if no valid symbol selected
+
 
     def update_account_info(self, account_id: str, balance: float | None, equity: float | None):
         """Public method to update account info StringVars from outside (e.g., SettingsPage)."""
