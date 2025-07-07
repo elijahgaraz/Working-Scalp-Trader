@@ -442,7 +442,11 @@ class Trader:
         print(f"Requesting full symbol details for IDs: {symbol_ids}")
         req = ProtoOASymbolByIdReq()
         req.symbolId.extend(symbol_ids)
-        # req.ctidTraderAccountId = self.ctid_trader_account_id # Not required for this message type
+        if not self.ctid_trader_account_id:
+            self._last_error = "Cannot get symbol details: ctidTraderAccountId is not set."
+            print(self._last_error)
+            return
+        req.ctidTraderAccountId = self.ctid_trader_account_id
 
         print(f"Sending ProtoOASymbolByIdReq: {req}")
         try:
