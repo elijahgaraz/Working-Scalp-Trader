@@ -761,13 +761,22 @@ class Trader:
         symbol_id = event.symbolId
 
         if self.default_symbol_id is not None and symbol_id == self.default_symbol_id:
-            # Ensure we have bid price and timestamp to work with
-            if not event.HasField('bid') or not event.HasField('timestamp'):
-                print(f"Spot Event for default symbol {symbol_id} missing bid or timestamp. Skipping OHLC update.")
+            # The fields event.bid and event.timestamp are standard int64 fields in ProtoOASpotEvent.
+            # For proto3, scalar fields don't use HasField in the same way as optional fields in proto2,
+            # and will have default values (e.g., 0) if not explicitly set.
+            # Given the logs show they are populated, we can proceed.
+            # A price of 0 or timestamp of 0 would be unusual and might indicate an issue,
+            # but the HasField check was the primary blocker for valid data.
+            if event.timestamp == 0: # A timestamp of 0 is highly unlikely for a valid event
+                print(f"Spot Event for default symbol {symbol_id} has timestamp 0. Skipping OHLC update.")
                 return
+            # A bid price of 0 could be technically possible in some rare market conditions,
+            # but usually, for active forex pairs, it will be > 0.
+            # For now, we'll proceed even with a bid of 0 if timestamp is valid,
+            # as price scaling and strategy logic should handle price values.
 
             # Scale the price
-            raw_bid_price = event.bid
+            raw_bid_price = event.bid # Directly access, as HasField was problematic
             price_scale_factor = 100000.0 # Default
             if symbol_id in self.symbol_details_map:
                 digits = self.symbol_details_map[symbol_id].digits
