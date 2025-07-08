@@ -761,6 +761,13 @@ class Trader:
         symbol_id = event.symbolId
 
         if self.default_symbol_id is not None and symbol_id == self.default_symbol_id:
+            # --- DETAILED TIMESTAMP LOGGING (Temporary for Investigation) ---
+            # Check if 'bid' field exists before trying to access it for logging, to be safe,
+            # though it's expected in a ProtoOASpotEvent.
+            bid_for_log = event.bid if hasattr(event, 'bid') else "N/A (field missing)" # More robust check
+            print(f"DEBUG Trader: SpotEvent for default symbol {symbol_id}. Timestamp={event.timestamp}, Bid={bid_for_log}")
+            # --- END DETAILED TIMESTAMP LOGGING ---
+
             # The fields event.bid and event.timestamp are standard int64 fields in ProtoOASpotEvent.
             # For proto3, scalar fields don't use HasField in the same way as optional fields in proto2,
             # and will have default values (e.g., 0) if not explicitly set.
@@ -770,13 +777,16 @@ class Trader:
             if event.timestamp == 0: # A timestamp of 0 is highly unlikely for a valid event
                 print(f"Spot Event for default symbol {symbol_id} has timestamp 0. Skipping OHLC update.")
                 return
-            # A bid price of 0 could be technically possible in some rare market conditions,
-            # but usually, for active forex pairs, it will be > 0.
-            # For now, we'll proceed even with a bid of 0 if timestamp is valid,
-            # as price scaling and strategy logic should handle price values.
+
+            # Ensure bid field actually exists and has a value before using it for OHLC.
+            # While HasField was problematic, directly using event.bid without checking if the server
+            # *could* send an event without it (even if against spec) might be risky.
+            # However, for OHLC, a missing bid is as problematic as a missing timestamp.
+            # For now, the timestamp == 0 check is primary. If timestamp is valid, we assume bid is also valid/present.
+            # The previous log showed bid was present when timestamp was 0, so server is sending it.
 
             # Scale the price
-            raw_bid_price = event.bid # Directly access, as HasField was problematic
+            raw_bid_price = event.bid # Directly access, as HasField was problematic. Assumed present if timestamp > 0.
             price_scale_factor = 100000.0 # Default
             if symbol_id in self.symbol_details_map:
                 digits = self.symbol_details_map[symbol_id].digits
